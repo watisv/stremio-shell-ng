@@ -1,10 +1,21 @@
 use crate::stremio_app::stremio_player::communication::{
-    BoolProp, CmdVal, InMsg, InMsgArgs, InMsgFn, MpvCmd, PlayerEnded, PlayerProprChange, PropKey,
-    PropVal,
+    BoolProp, CmdVal, InMsg, InMsgArgs, InMsgFn, MpvCmd, PlayerEnded, PlayerProprChange,
+    PlayerResponse, PropKey, PropVal,
 };
 use libmpv2::{events::PropertyData, mpv_end_file_reason};
 
 use serde_test::{assert_tokens, Token};
+
+#[test]
+fn video_ready_response() {
+    assert_eq!(
+        PlayerResponse::video_ready(7, true).to_value(),
+        Some(serde_json::json!([
+            "mpv-event-video-ready",
+            { "loadId": 7, "ready": true }
+        ]))
+    );
+}
 
 #[test]
 fn propr_change_tokens() {
@@ -96,6 +107,32 @@ fn ended_tokens() {
         &PlayerEnded::from_end_reason(mpv_end_file_reason::Quit),
         &tokens,
     );
+    let eof_tokens: [Token; 4] = [
+        Token::Struct {
+            name: "PlayerEnded",
+            len: 1,
+        },
+        Token::Str("reason"),
+        Token::Str("eof"),
+        Token::StructEnd,
+    ];
+    assert_tokens(
+        &PlayerEnded::from_end_reason(mpv_end_file_reason::Eof),
+        &eof_tokens,
+    );
+    let stop_tokens: [Token; 4] = [
+        Token::Struct {
+            name: "PlayerEnded",
+            len: 1,
+        },
+        Token::Str("reason"),
+        Token::Str("stop"),
+        Token::StructEnd,
+    ];
+    assert_tokens(
+        &PlayerEnded::from_end_reason(mpv_end_file_reason::Stop),
+        &stop_tokens,
+    );
 }
 
 #[test]
@@ -134,6 +171,22 @@ fn set_propr_tokens() {
             Token::Str("pause"),
             Token::Bool(true),
             Token::TupleEnd,
+            Token::TupleStructEnd,
+        ],
+    );
+}
+
+#[test]
+fn set_gpu_video_processing_tokens() {
+    assert_tokens(
+        &InMsg(InMsgFn::MpvSetGpuVideoProcessing, InMsgArgs::Flag(true)),
+        &[
+            Token::TupleStruct {
+                name: "InMsg",
+                len: 2,
+            },
+            Token::Str("mpv-set-gpu-video-processing"),
+            Token::Bool(true),
             Token::TupleStructEnd,
         ],
     );

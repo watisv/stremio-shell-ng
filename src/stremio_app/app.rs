@@ -16,7 +16,10 @@ use url::Url;
 use winapi::um::{winbase::CREATE_BREAKAWAY_FROM_JOB, winuser::WS_EX_TOPMOST};
 
 use crate::stremio_app::{
-    constants::{APP_NAME, UPDATE_ENDPOINT, UPDATE_INTERVAL, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH},
+    constants::{
+        safe_url, web_endpoint_with_streaming_server, APP_NAME, UPDATE_ENDPOINT, UPDATE_INTERVAL,
+        WEB_ENDPOINT, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
+    },
     ipc::{RPCRequest, RPCResponse},
     splash::SplashImage,
     stremio_player::Player,
@@ -28,6 +31,7 @@ use crate::stremio_app::{
     PipeServer,
 };
 
+use super::discord::DiscordRpc;
 use super::stremio_server::StremioServer;
 
 #[derive(Default, NwgUi)]
@@ -129,7 +133,16 @@ impl MainWindow {
         }
     }
     fn on_init(&self) {
-        self.webview.endpoint.set(self.webui_url.clone()).ok();
+        let webui_url =
+            if self.webui_url.trim_end_matches('/') == WEB_ENDPOINT.trim_end_matches('/') {
+                self.server
+                    .server_url()
+                    .map(|server_url| web_endpoint_with_streaming_server(&server_url))
+                    .unwrap_or_else(|| self.webui_url.clone())
+            } else {
+                self.webui_url.clone()
+            };
+        self.webview.endpoint.set(webui_url).ok();
         self.webview.dev_tools.set(self.dev_tools).ok();
         if let Some(hwnd) = self.window.handle.hwnd() {
             if let Ok(mut saved_style) = self.saved_window_style.try_borrow_mut() {
@@ -256,7 +269,10 @@ impl MainWindow {
         let hide_splash_sender = self.hide_splash_notice.sender();
         let focus_sender = self.focus_notice.sender();
         let autoupdater_setup_mutex = self.autoupdater_setup_file.clone();
+
+        let discord_rpc = DiscordRpc::new(web_tx.clone());
         let requested_fullscreen = self.requested_fullscreen.clone();
+
         thread::spawn(move || loop {
             if let Some(msg) = web_rx
                 .recv()
@@ -313,56 +329,59 @@ impl MainWindow {
                                 || arg_lc.starts_with("ftp://")
                                 || arg_lc.starts_with("ipfs://")
                             {
-                                open::that(arg).ok();
-                            }
-                        }
-                    }
-                    Some("play-external") => {
-                        if let Some(arg) = msg.get_params() {
-                            let arg = arg.as_str().unwrap_or("");
-                            let arg_lc = arg.to_lowercase();
-                            const ALLOWED_SCHEMES: &[&str] = &["mpv://", "vlc://", "potplayer://"];
-                            let allowed = ALLOWED_SCHEMES.iter().any(|s| arg_lc.starts_with(s));
-                            if !arg.is_empty() && allowed {
-                                if let Some(stream_url) =
-                                    arg_lc.starts_with("mpv://").then(|| &arg[6..])
-                                {
-                                    // `--` ends mpv's option parsing; the stream URL can't smuggle flags.
-                                    let mpv_paths: Vec<String> = vec![
-                                        std::env::var("ProgramFiles")
-                                            .ok()
-                                            .map(|v| format!("{v}\\mpv\\mpv.exe")),
-                                        std::env::var("ProgramFiles(x86)")
-                                            .ok()
-                                            .map(|v| format!("{v}\\mpv\\mpv.exe")),
-                                        std::env::var("LOCALAPPDATA")
-                                            .ok()
-                                            .map(|v| format!("{v}\\Programs\\mpv\\mpv.exe")),
-                                        std::env::var("LOCALAPPDATA")
-                                            .ok()
-                                            .map(|v| format!("{v}\\mpv\\mpv.exe")),
-                                        Some("mpv.exe".to_string()),
-                                    ]
-                                    .into_iter()
-                                    .flatten()
-                                    .collect();
-                                    for path in &mpv_paths {
-                                        if Command::new(path)
-                                            .arg("--")
-                                            .arg(stream_url)
-                                            .creation_flags(CREATE_BREAKAWAY_FROM_JOB)
-                                            .spawn()
-                                            .is_ok()
-                                        {
-                                            break;
-                                        }
-                                    }
-                                } else {
-                                    open::that(arg).ok();
+                                if let Some(url) = safe_url(arg) {
+                                    open::that(url).ok();
                                 }
                             }
                         }
                     }
+                    // play-external is temporary disabled due to security concerns
+                    // Some("play-external") => {
+                    //     if let Some(arg) = msg.get_params() {
+                    //         let arg = arg.as_str().unwrap_or("");
+                    //         let arg_lc = arg.to_lowercase();
+                    //         const ALLOWED_SCHEMES: &[&str] = &["mpv://", "vlc://", "potplayer://"];
+                    //         let allowed = ALLOWED_SCHEMES.iter().any(|s| arg_lc.starts_with(s));
+                    //         if !arg.is_empty() && allowed {
+                    //             if let Some(stream_url) =
+                    //                 arg_lc.starts_with("mpv://").then(|| &arg[6..])
+                    //             {
+                    //                 // `--` ends mpv's option parsing; the stream URL can't smuggle flags.
+                    //                 let mpv_paths: Vec<String> = vec![
+                    //                     std::env::var("ProgramFiles")
+                    //                         .ok()
+                    //                         .map(|v| format!("{v}\\mpv\\mpv.exe")),
+                    //                     std::env::var("ProgramFiles(x86)")
+                    //                         .ok()
+                    //                         .map(|v| format!("{v}\\mpv\\mpv.exe")),
+                    //                     std::env::var("LOCALAPPDATA")
+                    //                         .ok()
+                    //                         .map(|v| format!("{v}\\Programs\\mpv\\mpv.exe")),
+                    //                     std::env::var("LOCALAPPDATA")
+                    //                         .ok()
+                    //                         .map(|v| format!("{v}\\mpv\\mpv.exe")),
+                    //                     Some("mpv.exe".to_string()),
+                    //                 ]
+                    //                 .into_iter()
+                    //                 .flatten()
+                    //                 .collect();
+                    //                 for path in &mpv_paths {
+                    //                     if Command::new(path)
+                    //                         .arg("--")
+                    //                         .arg(stream_url)
+                    //                         .creation_flags(CREATE_BREAKAWAY_FROM_JOB)
+                    //                         .spawn()
+                    //                         .is_ok()
+                    //                     {
+                    //                         break;
+                    //                     }
+                    //                 }
+                    //             } else {
+                    //                 open::that(arg).ok();
+                    //             }
+                    //         }
+                    //     }
+                    // }
                     Some("win-focus") => {
                         focus_sender.notice();
                     }
@@ -399,6 +418,44 @@ impl MainWindow {
                             _ => {
                                 println!("Cannot obtain the setup file path");
                             }
+                        }
+                    }
+                    Some("discord-connect") => {
+                        if let Err(e) = discord_rpc.connect() {
+                            eprintln!("Discord connect error: {}", e);
+                            web_tx_web.send(RPCResponse::discord_status(false)).ok();
+                        }
+                    }
+                    Some("discord-disconnect") => {
+                        if let Err(e) = discord_rpc.disconnect() {
+                            eprintln!("Discord disconnect error: {}", e);
+                        }
+                        web_tx_web.send(RPCResponse::discord_status(false)).ok();
+                    }
+                    Some("discord-set-activity") => {
+                        if let Some(params) = msg.get_params() {
+                            let state = params.get("state").and_then(|v| v.as_str()).unwrap_or("");
+                            let details =
+                                params.get("details").and_then(|v| v.as_str()).unwrap_or("");
+                            let image = params.get("image").and_then(|v| v.as_str());
+                            let start_timestamp =
+                                params.get("startTimestamp").and_then(|v| v.as_i64());
+                            let end_timestamp = params.get("endTimestamp").and_then(|v| v.as_i64());
+
+                            if let Err(e) = discord_rpc.set_activity(
+                                state,
+                                details,
+                                image,
+                                start_timestamp,
+                                end_timestamp,
+                            ) {
+                                eprintln!("Discord set activity error: {}", e);
+                            }
+                        }
+                    }
+                    Some("discord-clear-activity") => {
+                        if let Err(e) = discord_rpc.clear_activity() {
+                            eprintln!("Discord clear activity error: {}", e);
                         }
                     }
                     Some(player_command) if player_command.starts_with("mpv-") => {

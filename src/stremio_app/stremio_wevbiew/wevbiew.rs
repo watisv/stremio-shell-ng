@@ -1,28 +1,31 @@
-use crate::stremio_app::constants::SERVER_IPC_KEY;
+use crate::stremio_app::constants::{safe_url, SERVER_IPC_KEY};
 use crate::stremio_app::ipc;
 use native_windows_gui::{self as nwg, PartialUi};
 use once_cell::unsync::OnceCell;
 use serde_json::json;
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::mem;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use url::Url;
+use std::time::Instant;
 use urlencoding::decode;
-use webview2::Controller;
+use webview2::{check_hresult, Controller};
+use webview2_sys::ICoreWebView2Settings3;
 use winapi::shared::windef::HWND;
-use winapi::um::winuser::{GetClientRect, VK_F7, WM_APPCOMMAND, WM_SETFOCUS};
+use winapi::um::winuser::{
+    GetClientRect, GetKeyState, VK_CONTROL, VK_F7, VK_LEFT, VK_RIGHT, WM_APPCOMMAND, WM_SETFOCUS,
+};
 
+const SEEK_KEY_REPEAT_INTERVAL_MS: u128 = 150;
 const APPCOMMAND_MEDIA_NEXTTRACK: u32 = 11;
 const APPCOMMAND_MEDIA_PREVIOUSTRACK: u32 = 12;
 const APPCOMMAND_MEDIA_PLAY_PAUSE: u32 = 14;
 const APPCOMMAND_MEDIA_PLAY: u32 = 46;
 const APPCOMMAND_MEDIA_PAUSE: u32 = 47;
-
-use super::constants::{WARNING_URL, WHITELISTED_HOSTS};
+const VK_F: u32 = b'F' as u32;
 
 #[derive(Default)]
 pub struct WebView {
@@ -81,7 +84,6 @@ impl PartialUi for WebView {
             .ok();
         let controller_clone = data.controller.clone();
         let endpoint = data.endpoint.clone();
-        let dev_tools = data.dev_tools.clone();
         let webview_flags = "--autoplay-policy=no-user-gesture-required --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
         let result = webview2::EnvironmentBuilder::new()
             .with_additional_browser_arguments(webview_flags)
@@ -106,26 +108,26 @@ impl PartialUi for WebView {
                             .expect("Cannot obtain webview from controller");
                     let settings = webview.get_settings().unwrap();
                     settings.put_is_status_bar_enabled(false).ok();
-                    settings.put_are_dev_tools_enabled(*dev_tools.get().unwrap()).ok();
+                    settings.put_are_dev_tools_enabled(true).ok();
+                    settings.put_are_default_context_menus_enabled(true).ok();
                     settings.put_is_zoom_control_enabled(false).ok();
                     settings.put_is_built_in_error_page_enabled(false).ok();
                     settings.put_are_host_objects_allowed(false).ok();
                     settings.put_are_default_script_dialogs_enabled(false).ok();
+                    if let Some(settings3) = settings
+                        .as_inner()
+                        .get_interface::<dyn ICoreWebView2Settings3>()
+                    {
+                        check_hresult(unsafe {
+                            settings3.put_are_browser_accelerator_keys_enabled(0)
+                        })
+                        .ok();
+                    }
 
                     // Handle window.open and href
                     webview.add_new_window_requested(move |_webview, event| {
                         if let Ok(uri) = event.get_uri() {
-                            if let Ok(url) = Url::parse(&uri) {
-                                let is_whitelisted = url.host().is_some_and(|host| {
-                                    WHITELISTED_HOSTS.iter().any(|whitelisted_host| host.to_string().ends_with(whitelisted_host))
-                                });
-
-                                let final_url = if is_whitelisted {
-                                    url.to_string()
-                                } else {
-                                    format!("{}{}", WARNING_URL, urlencoding::encode(url.as_ref()))
-                                };
-
+                            if let Some(final_url) = safe_url(&uri) {
                                 if let Err(e) = open::that(final_url) {
                                     eprintln!("Failed to open URL: {e}");
                                 }
@@ -168,22 +170,20 @@ impl PartialUi for WebView {
                             ).expect("Cannot add SERVER_IPC_KEY to webview");
 
                             wv.execute_script(r##"
-                            try{
-                                /* Disable context menus */
-                                document.addEventListener('contextmenu', (e) => {
-                                    if(!(e.target.tagName == "INPUT" &&
-                                    ['text', 'password', 'number', 'week', 'month', 'email'].includes(e.target.type.toLowerCase()))) {
-                                        e.stopPropagation();e.preventDefault()
-                                    }
-                                    })
-                            }catch(e){}
-
+                            window.addEventListener('contextmenu', event => {
+                                if (event.shiftKey) event.stopImmediatePropagation();
+                            }, true);
+                            window.addEventListener('mouseup', event => {
+                                if (event.shiftKey && event.button === 2) {
+                                    event.stopImmediatePropagation();
+                                }
+                            }, true);
                             try{console.log('Shell JS injected');if(window.self === window.top) {
                                 window.qt={webChannelTransport:{send:window.chrome.webview.postMessage}};
                                 window.chrome.webview.addEventListener('message',ev=>window.qt.webChannelTransport.onmessage(ev));
                                 }}catch(e){}
                             window.addEventListener("load", function() {if(initShellComm) try { initShellComm() } catch(e) {}}, false)
-                            
+
                             "##, |_| Ok(())).expect("Cannot add script to webview");
                             Ok(())
                         }).expect("Cannot add content loading");
@@ -193,14 +193,40 @@ impl PartialUi for WebView {
                         controller
                             .move_focus(webview2::MoveFocusReason::Programmatic)
                             .ok();
+                        let last_seek_repeat: RefCell<HashMap<u32, Instant>> =
+                            RefCell::new(HashMap::new());
                         controller.add_accelerator_key_pressed(move |_, e| {
-                            // Block F7, Ctrl+F, and Ctrl+G
                             let k = e.get_virtual_key()?;
-                            if k == VK_F7 as u32  || k == 70 & 0x7F || k == 71 & 0x7F {
-                                e.put_handled(true)
-                            } else {
-                                Ok(())
+                            let ctrl_pressed =
+                                unsafe { (GetKeyState(VK_CONTROL) as u16 & 0x8000) != 0 };
+                            if k == VK_F7 as u32 || (k == VK_F && ctrl_pressed) {
+                                return e.put_handled(true);
                             }
+
+                            if k != VK_LEFT as u32 && k != VK_RIGHT as u32 {
+                                return Ok(());
+                            }
+
+                            let status = e.get_physical_key_status()?;
+                            if status.is_key_released != 0 {
+                                last_seek_repeat.borrow_mut().remove(&k);
+                                return Ok(());
+                            }
+
+                            if status.was_key_down != 0 {
+                                let now = Instant::now();
+                                let mut repeats = last_seek_repeat.borrow_mut();
+                                if let Some(last) = repeats.get(&k) {
+                                    if now.duration_since(*last).as_millis()
+                                        < SEEK_KEY_REPEAT_INTERVAL_MS
+                                    {
+                                        return e.put_handled(true);
+                                    }
+                                }
+                                repeats.insert(k, now);
+                            }
+
+                            Ok(())
                         })
                         .unwrap();
 

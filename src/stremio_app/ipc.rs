@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{self, json};
 use std::cell::RefCell;
 
+use crate::stremio_app::gpu_video_processing;
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub type Channel = RefCell<Option<(flume::Sender<String>, flume::Receiver<String>)>>;
@@ -68,6 +70,12 @@ impl RPCResponse {
                             "".to_string(),
                             VERSION.to_string(),
                         ],
+                        vec![
+                            "".to_string(),
+                            "gpuVideoProcessing".to_string(),
+                            "".to_string(),
+                            gpu_video_processing::gpu_video_processing_supported().to_string(),
+                        ],
                     ],
                     signals: vec![],
                     methods: vec![vec!["onEvent".to_string(), "".to_string()]],
@@ -104,6 +112,11 @@ impl RPCResponse {
     }
     pub fn update_available() -> String {
         Self::response_message(Some(json!(["autoupdater-show-notif"])))
+    }
+    pub fn discord_status(connected: bool) -> String {
+        Self::response_message(Some(json!(["discord-status", {
+            "connected": connected,
+        }])))
     }
     pub fn media_key(action: &str) -> String {
         Self::response_message(Some(json!(["media-key", action])))

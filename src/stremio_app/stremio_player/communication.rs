@@ -30,7 +30,6 @@ impl PlayerProprChange {
                     serde_json::Value::String(s.to_string())
                 }
             }
-            PropertyData::Node(_) => unimplemented!("`PropertyData::Node` is not supported"),
         }
     }
     pub fn from_name_value(name: String, value: PropertyData) -> Self {
@@ -56,6 +55,9 @@ pub struct PlayerEnded {
 impl PlayerEnded {
     fn string_from_end_reason(data: EndFileReason) -> String {
         match data {
+            mpv_end_file_reason::Eof => "eof".to_string(),
+            mpv_end_file_reason::Stop => "stop".to_string(),
+            mpv_end_file_reason::Redirect => "redirect".to_string(),
             mpv_end_file_reason::Error => "error".to_string(),
             mpv_end_file_reason::Quit => "quit".to_string(),
             _ => "other".to_string(),
@@ -80,17 +82,31 @@ impl PlayerEnded {
 pub struct PlayerError {
     pub error: String,
 }
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayerVideoReady {
+    pub load_id: u64,
+    pub ready: bool,
+}
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum PlayerEvent {
     PropChange(PlayerProprChange),
     End(PlayerEnded),
     Error(PlayerError),
+    VideoReady(PlayerVideoReady),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PlayerResponse<'a>(pub &'a str, pub PlayerEvent);
 impl PlayerResponse<'_> {
+    pub fn video_ready(load_id: u64, ready: bool) -> PlayerResponse<'static> {
+        PlayerResponse(
+            "mpv-event-video-ready",
+            PlayerEvent::VideoReady(PlayerVideoReady { load_id, ready }),
+        )
+    }
+
     pub fn to_value(&self) -> Option<serde_json::Value> {
         serde_json::to_value(self).ok()
     }
@@ -143,6 +159,7 @@ pub enum InMsgFn {
     MpvSetProp,
     MpvCommand,
     MpvObserveProp,
+    MpvSetGpuVideoProcessing,
 }
 stringable!(InMsgFn);
 // Bool
@@ -192,7 +209,7 @@ stringable!(FpProp);
 pub enum StrProp {
     FfmpegVersion,
     Hwdec,
-    InputDefaltBindings,
+    InputDefaultBindings,
     InputVoKeyboard,
     Metadata,
     MpvVersion,
@@ -276,6 +293,7 @@ pub enum InMsgArgs {
     StProp(PropKey, PropVal),
     Cmd(CmdVal),
     ObProp(PropKey),
+    Flag(bool),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
