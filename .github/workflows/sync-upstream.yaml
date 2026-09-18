@@ -1,0 +1,68 @@
+name: Sync upstream
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Configure git
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/Stremio/stremio-shell-ng.git
+          git fetch upstream main
+
+      - name: Merge upstream changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout main
+
+          if git merge upstream/main --no-edit; then
+            exit 0
+          fi
+
+          conflicted_files="$(git diff --name-only --diff-filter=U)"
+
+          if [ "$conflicted_files" = "README.md" ]; then
+            git checkout --theirs README.md
+            git add README.md
+            git commit --no-edit
+            exit 0
+          fi
+
+          echo "Merge conflict - manual intervention needed"
+          printf '%s\n' "$conflicted_files"
+          exit 1
+
+      - name: Push changes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet origin/main...HEAD; then
+            echo "Already up to date"
+            exit 0
+          fi
+
+          git push origin HEAD:main
