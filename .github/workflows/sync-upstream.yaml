@@ -42,9 +42,9 @@ jobs:
             exit 0
           fi
 
-          conflicted_files="$(git diff --name-only --diff-filter=U)"
+          mapfile -t conflicted_files < <(git diff --name-only --diff-filter=U | sort -u)
 
-          if [ "$conflicted_files" = "README.md" ]; then
+          if [ "${#conflicted_files[@]}" -eq 1 ] && [ "${conflicted_files[0]}" = "README.md" ]; then
             git checkout --theirs README.md
             git add README.md
             git commit --no-edit
@@ -52,7 +52,7 @@ jobs:
           fi
 
           echo "Merge conflict - manual intervention needed"
-          printf '%s\n' "$conflicted_files"
+          printf '%s\n' "${conflicted_files[@]}"
           exit 1
 
       - name: Push changes
